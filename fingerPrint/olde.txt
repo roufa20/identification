@@ -1,0 +1,185 @@
+//package org.apache.spark.examples.streaming
+
+import kafka.serializer.StringDecoder
+import org.apache.spark.streaming._
+import org.apache.spark.streaming.kafka._
+import org.apache.spark.SparkConf
+import org.apache.spark._
+import org.apache.spark.streaming.StreamingContext._
+import com.snowplowanalytics.snowplow.analytics.scalasdk.json.EventTransformer
+import org.apache.log4j.Logger
+import org.apache.log4j.Level
+import org.apache.spark.sql.SparkSession
+import org.anormcypher._
+import play.api.libs.ws._
+import org.neo4j.spark._
+
+import java.util.Properties
+import org.apache.kafka.clients.producer._
+
+object FingerPrintStreamingFromKafkaToSpark {
+
+  //Function CheckNode is for Create and Update nodes in Neo4j
+  def checkNodes(user_id: String, user_fingerprint: String, app_id: String, user_ipaddress: String, allJsonContainer: String): Int = {
+
+    //TODO connexion NEo4j
+    implicit val wsclient = ning.NingWSClient()
+    implicit val connection2: Neo4jConnection = Neo4jREST("localhost", 7474, "neo4j", "admin");
+
+    implicit val ec = scala.concurrent.ExecutionContext.global
+
+    if(user_id == null){
+      System.out.println("user_id is null");
+      val reqForExistingFP = Cypher("""MATCH (f:FingerPrint) where f.user_fingerprint='""" + user_fingerprint +"""' RETURN f.user_ipaddress AS pp""");
+      val streamReqForExistingFP = reqForExistingFP();
+      //System.out.println(streamReqForExistingFP(0));
+      if (streamReqForExistingFP.isEmpty) {
+
+        val reqCreateFPNode = Cypher(""" MERGE (fingerPrint:FingerPrint{user_fingerprint:'""" + user_fingerprint +"""',user_ipaddress:'""" + user_ipaddress +"""'}) RETURN * """);
+        val execReqCreateFPNode = reqCreateFPNode();
+        System.out.println("create new finger print node");
+        identifiedSelcareb2b(allJsonContainer.asInstanceOf[String]);
+
+      }else{
+        System.out.println("finger print node exite and has no UserID");
+        //get userId
+        val reqForGetUserIdFP = Cypher("""MATCH (a:Account)-[h:HasFingerPrint]->(f:FingerPrint)where f.user_fingerprint='"""+user_fingerprint+"""' return a.idUser AS user_id""");
+        val streamRreqForGetUserIdFP = reqForGetUserIdFP.apply().head;
+        val identifieUserId = streamRreqForGetUserIdFP[String]("user_id")
+
+        val objectIdentifieUserId = "\"user_id\":\""+identifieUserId+"\"";
+
+        //new jsonValue
+        val allJsonContainerChanged = allJsonContainer.replaceAll("\"user_id\":null", objectIdentifieUserId);
+        identifiedSelcareb2b(allJsonContainerChanged);
+      }
+
+    }else{
+      System.out.println("user_id is not null");
+
+      // test If The User Is exist
+      val req = Cypher("""MATCH (n:Account) where n.idUser='""" + user_id +"""' RETURN n """);
+
+      // get a stream of results back
+      val stream = req()
+
+      if (stream.isEmpty) {
+
+        System.out.println("Not exist");
+        //create Nodes (Account And FingerPrint) and Relationship (HasFingerPrint)
+        val reqCreateNode = Cypher(""" MERGE (account:Account{idUser:'""" + user_id +"""'}) MERGE (fingerPrint:FingerPrint{user_fingerprint:'""" + user_fingerprint +"""',user_ipaddress:'""" + user_ipaddress +"""'}) CREATE (account)-[:HasFingerPrint]->(fingerPrint) RETURN * """);
+        val exect = reqCreateNode();
+        System.out.println("Node created");
+
+      } else {
+        System.out.println("not empty");
+        //test if Relation exist between two nodes
+        val reqExistRelation = Cypher("""MATCH (a:Account)-[r:HasFingerPrint]->(f:FingerPrint)WHERE a.idUser = '""" + user_id +"""' AND f.user_fingerprint='""" + user_fingerprint +"""' RETURN r """);
+        val ifExistRelation = reqExistRelation();
+        if (ifExistRelation.isEmpty) {
+          //Create Relation
+          val reqCreateNewRelation = Cypher("""MATCH (account:Account) WHERE account.idUser='""" + user_id +"""' MERGE (fingerPrint:FingerPrint{user_fingerprint:'""" + user_fingerprint +"""',user_ipaddress:'""" + user_ipaddress +"""'}) CREATE (account)-[:HasFingerPrint]->(fingerPrint) RETURN *""");
+          val execReqCreateNewRelation = reqCreateNewRelation();
+          System.out.println("Relationship Created");
+
+        } else {
+          System.out.println("Relationship exist");
+        }
+
+      }
+
+      //this is an identified User
+      identifiedSelcareb2b(allJsonContainer.asInstanceOf[String])
+
+    }
+    wsclient.close();
+
+    return 1;
+  }
+
+  //Function to push the result to KAFKA Producer
+  def identifiedSelcareb2b(allJsonContainer: String): Int = {
+
+    //Add libs to send Producer Message
+    import java.util.Properties
+    import org.apache.kafka.clients.producer._
+
+    val  props = new Properties()
+    props.put("bootstrap.servers", "bigdata2.ip-188-165-248.eu:9092,bigdata3.ip-188-165-248.eu:9092,bigdata4.ip-188-165-248.eu:9092")
+    props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+
+    val producer = new KafkaProducer[String, String](props)
+
+    val TOPIC="identifiedSelcareb2b"
+
+    for(i<- 1 to 5){
+      //val record = new ProducerRecord(TOPIC, "key", s"hello $i")
+      val record = new ProducerRecord(TOPIC, "key", allJsonContainer)
+      producer.send(record)
+      System.out.println("send Record");
+    }
+
+    val record = new ProducerRecord(TOPIC, "key", "the end "+new java.util.Date)
+    producer.send(record)
+
+    producer.close();
+
+    System.out.println("kafka send message is sended");
+
+    System.out.println(allJsonContainer);
+    return 1
+  }
+
+  //Main class
+  def main(args: Array[String]) {
+    //Hide Log Message
+    Logger.getLogger("org").setLevel(Level.OFF)
+    Logger.getLogger("akka").setLevel(Level.OFF)
+
+    val sparkConf = new SparkConf().setAppName("DirectKafkaWordCount")
+      .set("spark.master", "local[2]")
+    val ssc = new StreamingContext(sparkConf, Seconds(2))
+
+    // Create direct kafka stream with brokers and topics
+    val topics = "enrich_selcareb2b";
+    val brokers = "bigdata2.ip-188-165-248.eu:9092,bigdata3.ip-188-165-248.eu:9092,bigdata4.ip-188-165-248.eu:9092";
+    val topicsSet = topics.split(",").toSet
+    val kafkaParams = Map[String, String]("metadata.broker.list" -> brokers)
+    val messages = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](
+      ssc, kafkaParams, topicsSet)
+
+    val lines = messages.map(_._2)
+
+    val jsons = lines.
+      map(line => EventTransformer.transform(line)).
+      filter(_.isSuccess).
+      flatMap(_.toOption);
+
+    jsons.foreachRDD { rdd =>
+      // Get the singleton instance of SparkSession
+      val spark = SparkSession.builder.config(rdd.sparkContext.getConf).getOrCreate()
+      import spark.implicits._
+      val anotherRDD = spark.read.json(rdd)
+
+      if (!anotherRDD.rdd.isEmpty()) {
+        val allJsonContainer = rdd.collect()(0);
+        val allValRDD = anotherRDD.select("user_id", "user_fingerprint", "app_id", "user_ipaddress").collect()
+        val user_id :String = allValRDD(0)(0);
+        val user_fingerprint = allValRDD(0)(1);
+        val app_id = allValRDD(0)(2);
+        val user_ipaddress = allValRDD(0)(3);
+
+        checkNodes(user_id, user_fingerprint.asInstanceOf[String], app_id.asInstanceOf[String], user_ipaddress.asInstanceOf[String],allJsonContainer.asInstanceOf[String]);
+
+      }
+    }
+
+    System.out.println("End KFKA");
+    // Start the computation
+    ssc.start()
+    ssc.awaitTermination()
+  }
+
+
+}
